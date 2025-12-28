@@ -1,6 +1,8 @@
 /* eslint-disable import/no-named-as-default-member */
 import Phaser from 'phaser';
 
+import { Bullet, Tower, TOWER_COLOR, TOWER_CONFIG, TowerType } from '../game/towers';
+
 type EnemyKind = 'hound' | 'puppet' | 'swarm' | 'brute' | 'watcher';
 type EnemyState = 'advance' | 'dead';
 type AuraMode = 'speed' | 'regen';
@@ -85,6 +87,7 @@ const ENEMY_CONFIG: Record<EnemyKind, EnemyConfig> = {
     summonCount: 2
   }
 };
+
 
 class PathManager {
   readonly path: Phaser.Curves.Path;
@@ -235,6 +238,8 @@ class EnemyUnit {
   private bruteCooldown = 0;
   private blinkTimer = 0;
   private summonTimer = 0;
+  private slowTimer = 0;
+  private slowFactor = 1;
 
   constructor(
     scene: Phaser.Scene,
@@ -288,10 +293,16 @@ class EnemyUnit {
     if (this.boostTimer > 0) {
       this.boostTimer -= dt;
     }
+    if (this.slowTimer > 0) {
+      this.slowTimer -= dt;
+      if (this.slowTimer <= 0) {
+        this.slowFactor = 1;
+      }
+    }
 
     const riftMultiplier = ctx.rift ? ctx.rift.getSpeedMultiplier(this.getPosition()) : 1;
     const boostMultiplier = this.boostTimer > 0 ? this.cfg.speedBoostMultiplier ?? 1 : 1;
-    const speed = this.cfg.speed * speedBuff * riftMultiplier * boostMultiplier;
+    const speed = this.cfg.speed * speedBuff * riftMultiplier * boostMultiplier * this.slowFactor;
 
     this.progress += (speed * dt) / ctx.pathLength;
     if (this.progress >= 1) {
@@ -328,6 +339,17 @@ class EnemyUnit {
     }
     if (this.hp <= 0) {
       this.destroy();
+    }
+  }
+
+  applySlow(percent: number, duration: number) {
+    if (percent <= 0 || duration <= 0) return;
+    const factor = Math.max(0.2, 1 - percent);
+    if (factor < this.slowFactor || this.slowTimer <= 0) {
+      this.slowFactor = factor;
+      this.slowTimer = duration;
+    } else if (factor === this.slowFactor) {
+      this.slowTimer = Math.max(this.slowTimer, duration);
     }
   }
 
@@ -393,133 +415,6 @@ class EnemyUnit {
   }
 }
 
-class Tower {
-  private readonly scene: Phaser.Scene;
-  private readonly sprite: Phaser.GameObjects.Sprite;
-  private readonly range: number;
-  private readonly fireRate: number;
-  private readonly damage: number;
-  private cooldown = 0;
-  private hp = 180;
-  private destroyed = false;
-
-  constructor(scene: Phaser.Scene, position: Point, range = 210, fireRate = 0.8, damage = 16) {
-    this.scene = scene;
-    this.range = range;
-    this.fireRate = fireRate;
-    this.damage = damage;
-    this.sprite = scene.add.sprite(position.x, position.y, 'tower');
-    this.sprite.setDepth(2);
-  }
-
-  update(dt: number, enemies: EnemyUnit[], bullets: Bullet[]) {
-    if (this.destroyed) return;
-    this.cooldown -= dt;
-    if (this.cooldown > 0) return;
-
-    const target = this.findTarget(enemies);
-    if (!target) return;
-
-    bullets.push(new Bullet(this.scene, this.sprite.getCenter(), target, this.damage));
-    this.cooldown = this.fireRate;
-  }
-
-  takeDamage(amount: number) {
-    if (this.destroyed) return;
-    this.hp -= amount;
-    this.sprite.setAlpha(0.9 * Math.max(0.2, this.hp / 180));
-    if (this.hp <= 0) {
-      this.destroyed = true;
-      this.sprite.destroy();
-    }
-  }
-
-  isDestroyed() {
-    return this.destroyed;
-  }
-
-  getPosition(): Phaser.Math.Vector2 {
-    return this.sprite.getCenter();
-  }
-
-  private findTarget(enemies: EnemyUnit[]) {
-    const origin = this.sprite.getCenter();
-    let closest: EnemyUnit | null = null;
-    let closestDist = Number.MAX_VALUE;
-
-    enemies.forEach((enemy) => {
-      if (enemy.isDead()) return;
-      const dist = Phaser.Math.Distance.BetweenPoints(origin, enemy.getPosition());
-      if (dist <= this.range && dist < closestDist) {
-        closest = enemy;
-        closestDist = dist;
-      }
-    });
-
-    return closest;
-  }
-}
-
-class Bullet {
-  private readonly sprite: Phaser.GameObjects.Sprite;
-  private readonly speed = 340;
-  private readonly damage: number;
-  private target: EnemyUnit;
-  private alive = true;
-
-  constructor(scene: Phaser.Scene, start: Point, target: EnemyUnit, damage: number) {
-    this.target = target;
-    this.damage = damage;
-    this.sprite = scene.add.sprite(start.x, start.y, 'bullet');
-    this.sprite.setDepth(3);
-  }
-
-  update(dt: number) {
-    if (!this.alive) return;
-    if (this.target.isDead()) {
-      this.destroy();
-      return;
-    }
-
-    const targetPos = this.target.getPosition();
-    const current = this.sprite.getCenter();
-    const toTarget = targetPos.clone().subtract(current);
-    const distance = toTarget.length();
-
-    if (distance < 1) {
-      this.hit();
-      return;
-    }
-
-    const step = this.speed * dt;
-    if (distance <= step) {
-      this.sprite.setPosition(targetPos.x, targetPos.y);
-      this.hit();
-      return;
-    }
-
-    const direction = toTarget.normalize();
-    this.sprite.x += direction.x * step;
-    this.sprite.y += direction.y * step;
-  }
-
-  private hit() {
-    if (!this.alive) return;
-    this.target.takeDamage(this.damage);
-    this.destroy();
-  }
-
-  private destroy() {
-    if (!this.alive) return;
-    this.alive = false;
-    this.sprite.destroy();
-  }
-
-  isAlive() {
-    return this.alive;
-  }
-}
-
 export default class GameScene extends Phaser.Scene {
   private pathManager!: PathManager;
   private enemies: EnemyUnit[] = [];
@@ -535,7 +430,8 @@ export default class GameScene extends Phaser.Scene {
   private rift?: RiftHazard;
   private sealKey?: Phaser.Input.Keyboard.Key;
   private resources = 150;
-  private readonly towerCost = 70;
+  private selectedTowerType: TowerType = 'basic';
+  private typeKeys?: Partial<Record<TowerType, Phaser.Input.Keyboard.Key>>;
   private useAltPath = false;
   private lastReward = 0;
   private lastRewardTimer = 0;
@@ -572,8 +468,21 @@ export default class GameScene extends Phaser.Scene {
     this.placementText.setDepth(9);
     this.placementText.setVisible(false);
 
+    this.typeKeys = {
+      basic: this.input.keyboard?.addKey('ONE') as Phaser.Input.Keyboard.Key,
+      slow: this.input.keyboard?.addKey('TWO') as Phaser.Input.Keyboard.Key,
+      splash: this.input.keyboard?.addKey('THREE') as Phaser.Input.Keyboard.Key,
+      sniper: this.input.keyboard?.addKey('FOUR') as Phaser.Input.Keyboard.Key
+    };
+
     this.input.on('pointerdown', (pointer: Phaser.Input.Pointer) => {
-      this.tryPlaceTower({ x: pointer.worldX, y: pointer.worldY });
+      const pos = { x: pointer.worldX, y: pointer.worldY };
+      const targetTower = this.findTowerAt(pos);
+      if (targetTower) {
+        this.tryUpgradeTower(targetTower, pos);
+      } else {
+        this.tryPlaceTower(pos);
+      }
     });
 
     this.input.on('pointermove', (pointer: Phaser.Input.Pointer) => {
@@ -613,6 +522,8 @@ export default class GameScene extends Phaser.Scene {
     const dt = delta / 1000;
     this.elapsed += dt;
 
+    this.handleTypeHotkeys();
+
     this.lastRewardTimer = Math.max(0, this.lastRewardTimer - dt);
 
     if (this.rift) {
@@ -649,10 +560,11 @@ export default class GameScene extends Phaser.Scene {
     if (this.hudText) {
       const seal = this.rift ? (this.rift.isSealed() ? 'sealed' : `${Math.round(this.rift.getSealProgress() * 100)}%`) : 'n/a';
       const cd = this.pendingSpawns > 0 ? `spawning` : `${this.waveCooldown.toFixed(1)}s`;
+      const cost = this.getSelectedCost();
       this.hudText.setText(
-        `Wave ${this.wave}\nNext wave: ${cd}\nEnemies: ${this.enemies.length}\nTowers: ${this.towers.length}\nResources: ${this.resources} (cost ${this.towerCost})${
+        `Wave ${this.wave}\nNext wave: ${cd}\nEnemies: ${this.enemies.length}\nTowers: ${this.towers.length}\nResources: ${this.resources} (cost ${cost})${
           this.lastRewardTimer > 0 ? ` [+${this.lastReward}]` : ''
-        }\nRift seal: ${seal}\nClick to place tower\nHold [S] to seal`
+        }\nRift seal: ${seal}\nType: ${this.selectedTowerType} [1-4]\nClick to place | click tower to upgrade\nHold [S] to seal`
       );
     }
 
@@ -774,22 +686,41 @@ export default class GameScene extends Phaser.Scene {
       { x: 460, y: 260 },
       { x: 720, y: 300 }
     ];
-    return placements.map((p) => new Tower(this, p));
+    return placements.map((p) => new Tower(this, p, 'basic'));
   }
 
   private tryPlaceTower(pos: Point) {
     const check = this.isPlacementAllowed(pos);
     if (!check.valid) return;
-    this.towers.push(new Tower(this, pos));
-    this.resources -= this.towerCost;
+    this.towers.push(new Tower(this, pos, this.selectedTowerType));
+    this.resources -= this.getSelectedCost();
     this.flashPlacement(pos);
+    this.showPopup(pos, `Built ${this.selectedTowerType}`, '#9ef7c2');
+  }
+
+  private tryUpgradeTower(tower: Tower, pos: Point) {
+    const nextCost = tower.getNextCost();
+    if (nextCost === null) {
+      this.showPopup(pos, 'Max level', '#d4d4d8');
+      return;
+    }
+    if (this.resources < nextCost) {
+      this.showPopup(pos, `Need ${nextCost}`, '#ff8a8a');
+      return;
+    }
+    const upgraded = tower.upgrade();
+    if (upgraded) {
+      this.resources -= nextCost;
+      this.flashPlacement(pos);
+      this.showPopup(pos, `Level ${tower.getLevel()}`, '#9ef7c2');
+    }
   }
 
   private isPlacementAllowed(pos: Point) {
     if (pos.x < 30 || pos.x > 930 || pos.y < 30 || pos.y > 510) {
       return { valid: false, reason: 'out-of-bounds' };
     }
-    if (this.resources < this.towerCost) {
+    if (this.resources < this.getSelectedCost()) {
       return { valid: false, reason: 'no-resources' };
     }
     const pt = new Phaser.Math.Vector2(pos.x, pos.y);
@@ -808,17 +739,61 @@ export default class GameScene extends Phaser.Scene {
 
   private updatePlacementGhost(pos: Point) {
     if (!this.placementGhost || !this.placementText) return;
-    this.placementGhost.setVisible(true);
-    this.placementText.setVisible(true);
+    const tower = this.findTowerAt(pos);
     this.placementGhost.setPosition(pos.x, pos.y);
     this.placementText.setPosition(pos.x + 28, pos.y - 12);
+
+    if (tower) {
+      const next = tower.getNextCost();
+      this.placementGhost.setVisible(false);
+      this.placementText.setVisible(true);
+      if (next === null) {
+        this.placementText.setText('Max level');
+        this.placementText.setColor('#d4d4d8');
+      } else {
+        this.placementText.setText(`Upgrade (${next})`);
+        this.placementText.setColor(this.resources >= next ? '#f2f09e' : '#ff8a8a');
+      }
+      return;
+    }
+
+    this.placementGhost.setVisible(true);
+    this.placementText.setVisible(true);
 
     const check = this.isPlacementAllowed(pos);
     const texture = check.valid ? 'tower-ghost-ok' : 'tower-ghost-bad';
     this.placementGhost.setTexture(texture);
     this.placementGhost.setAlpha(check.valid ? 0.9 : 0.6);
-    this.placementText.setText(check.valid ? `Place (${this.towerCost})` : 'Blocked');
+    this.placementGhost.setTint(TOWER_COLOR[this.selectedTowerType]);
+    this.placementText.setText(check.valid ? `Place (${this.getSelectedCost()})` : 'Blocked');
     this.placementText.setColor(check.valid ? '#88ffb7' : '#ff6b6b');
+  }
+
+  private getSelectedCost() {
+    return TOWER_CONFIG[this.selectedTowerType].levels[0].cost;
+  }
+
+  private handleTypeHotkeys() {
+    if (!this.typeKeys) return;
+    if (this.typeKeys.basic && Phaser.Input.Keyboard.JustDown(this.typeKeys.basic)) this.selectedTowerType = 'basic';
+    if (this.typeKeys.slow && Phaser.Input.Keyboard.JustDown(this.typeKeys.slow)) this.selectedTowerType = 'slow';
+    if (this.typeKeys.splash && Phaser.Input.Keyboard.JustDown(this.typeKeys.splash)) this.selectedTowerType = 'splash';
+    if (this.typeKeys.sniper && Phaser.Input.Keyboard.JustDown(this.typeKeys.sniper)) this.selectedTowerType = 'sniper';
+  }
+
+  private findTowerAt(pos: Point): Tower | null {
+    const pt = new Phaser.Math.Vector2(pos.x, pos.y);
+    return this.towers.find((t) => t.getPosition().distance(pt) < 26) ?? null;
+  }
+
+  private showPopup(pos: Point, text: string, color: string) {
+    const label = this.add.text(pos.x, pos.y - 28, text, {
+      fontSize: '12px',
+      color,
+      fontFamily: 'Montserrat, sans-serif'
+    });
+    label.setDepth(11);
+    this.tweens.add({ targets: label, y: label.y - 12, alpha: 0, duration: 600, onComplete: () => label.destroy() });
   }
 
   private flashPlacement(pos: Point) {

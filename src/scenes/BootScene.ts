@@ -13,6 +13,9 @@ export default class BootScene extends Phaser.Scene {
     const swarmColor = 0x5cd6a6;
     const bruteColor = 0xffb347;
     const towerColor = 0x88ddee;
+    const towerSlowColor = 0x7bd7ff;
+    const towerSplashColor = 0xfdbb74;
+    const towerSniperColor = 0xc8a8ff;
     const bulletColor = 0xf7e27d;
     const riftColor = 0x7c3aed;
     const ghostOk = 0x88ffb7;
@@ -50,6 +53,27 @@ export default class BootScene extends Phaser.Scene {
     g.fillStyle(towerColor, 1);
     g.fillRoundedRect(0, 0, 36, 36, 6);
     g.generateTexture('tower', 36, 36);
+    g.clear();
+
+    g.fillStyle(towerSlowColor, 1);
+    g.fillRoundedRect(0, 0, 36, 36, 6);
+    g.lineStyle(3, 0x3fb5ff, 0.8);
+    g.strokeRoundedRect(2, 2, 32, 32, 6);
+    g.generateTexture('tower-slow', 36, 36);
+    g.clear();
+
+    g.fillStyle(towerSplashColor, 1);
+    g.fillRoundedRect(0, 0, 36, 36, 6);
+    g.lineStyle(3, 0xff9f43, 0.85);
+    g.strokeCircle(18, 18, 12);
+    g.generateTexture('tower-splash', 36, 36);
+    g.clear();
+
+    g.fillStyle(towerSniperColor, 1);
+    g.fillRoundedRect(0, 0, 36, 36, 6);
+    g.lineStyle(3, 0x9c7cff, 0.8);
+    g.strokeLineShape(new Phaser.Geom.Line(4, 32, 32, 4));
+    g.generateTexture('tower-sniper', 36, 36);
     g.clear();
 
     g.fillStyle(bulletColor, 1);
