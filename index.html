@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Shadow Rift</title>
+    <style>
+      body {
+        margin: 0;
+        background: #0b0b12;
+        color: #e4e4ec;
+        font-family: 'Montserrat', 'Segoe UI', sans-serif;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        height: 100vh;
+      }
+      #game-container {
+        width: 960px;
+        height: 540px;
+        border: 2px solid #303040;
+        box-shadow: 0 0 32px rgba(0, 0, 0, 0.45);
+      }
+    </style>
+  </head>
+  <body>
+    <div id="game-container"></div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>
