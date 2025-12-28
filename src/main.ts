@@ -1,3 +1,4 @@
+/* eslint-disable import/no-named-as-default-member */
 import Phaser from 'phaser';
 
 import BootScene from './scenes/BootScene';

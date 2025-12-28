@@ -1,3 +1,4 @@
+/* eslint-disable import/no-named-as-default-member */
 import Phaser from 'phaser';
 
 type EnemyKind = 'hound' | 'puppet' | 'swarm' | 'brute' | 'watcher';
@@ -63,24 +64,24 @@ const ENEMY_CONFIG: Record<EnemyKind, EnemyConfig> = {
   brute: {
     texture: 'enemy-brute',
     speed: 70,
-    hp: 340,
+    hp: 320,
     reward: 25,
-    towerDamage: 28,
+    towerDamage: 26,
     towerRange: 70,
     attackCooldown: 1.6
   },
   watcher: {
     texture: 'enemy-puppet',
-    speed: 55,
-    hp: 520,
+    speed: 52,
+    hp: 480,
     reward: 120,
     auraRadius: 210,
     auraToggle: 3,
-    speedBuff: 1.15,
-    regenPerSecond: 10,
-    blinkInterval: 4.5,
-    blinkDistance: 0.12,
-    summonInterval: 6,
+    speedBuff: 1.12,
+    regenPerSecond: 8,
+    blinkInterval: 5,
+    blinkDistance: 0.1,
+    summonInterval: 7,
     summonCount: 2
   }
 };
@@ -113,6 +114,17 @@ class PathManager {
 
   getPoint(t: number): Phaser.Math.Vector2 {
     return this.path.getPoint(t);
+  }
+
+  distanceToPath(point: Phaser.Math.Vector2, samples = 80): number {
+    let min = Number.MAX_VALUE;
+    for (let i = 0; i <= samples; i += 1) {
+      const t = i / samples;
+      const p = this.path.getPoint(t);
+      const d = Phaser.Math.Distance.BetweenPoints(point, p);
+      if (d < min) min = d;
+    }
+    return min;
   }
 
   setPoints(points: Point[]) {
@@ -198,6 +210,10 @@ class RiftHazard {
 
   getSealProgress() {
     return this.sealProgress;
+  }
+
+  getPosition() {
+    return this.pos.clone();
   }
 }
 
@@ -338,6 +354,9 @@ class EnemyUnit {
       const point = this.path.getPoint(this.progress);
       this.sprite.setPosition(point.x, point.y);
       this.blinkTimer = this.cfg.blinkInterval ?? 4.5;
+      const ripple = this.scene.add.circle(point.x, point.y, 8, 0x7c3aed, 0.35);
+      ripple.setDepth(5);
+      this.scene.tweens.add({ targets: ripple, radius: 50, alpha: 0, duration: 320, onComplete: () => ripple.destroy() });
     }
 
     if (this.summonTimer <= 0) {
@@ -384,7 +403,7 @@ class Tower {
   private hp = 180;
   private destroyed = false;
 
-  constructor(scene: Phaser.Scene, position: Point, range = 200, fireRate = 0.85, damage = 14) {
+  constructor(scene: Phaser.Scene, position: Point, range = 210, fireRate = 0.8, damage = 16) {
     this.scene = scene;
     this.range = range;
     this.fireRate = fireRate;
@@ -442,7 +461,6 @@ class Tower {
 }
 
 class Bullet {
-  private readonly scene: Phaser.Scene;
   private readonly sprite: Phaser.GameObjects.Sprite;
   private readonly speed = 340;
   private readonly damage: number;
@@ -450,7 +468,6 @@ class Bullet {
   private alive = true;
 
   constructor(scene: Phaser.Scene, start: Point, target: EnemyUnit, damage: number) {
-    this.scene = scene;
     this.target = target;
     this.damage = damage;
     this.sprite = scene.add.sprite(start.x, start.y, 'bullet');
@@ -510,11 +527,19 @@ export default class GameScene extends Phaser.Scene {
   private bullets: Bullet[] = [];
   private hudText?: Phaser.GameObjects.Text;
   private waveText?: Phaser.GameObjects.Text;
+  private waveInfoText?: Phaser.GameObjects.Text;
+  private sealBarBg?: Phaser.GameObjects.Rectangle;
+  private sealBarFill?: Phaser.GameObjects.Rectangle;
+  private placementGhost?: Phaser.GameObjects.Sprite;
+  private placementText?: Phaser.GameObjects.Text;
   private rift?: RiftHazard;
   private sealKey?: Phaser.Input.Keyboard.Key;
-  private resources = 180;
-  private readonly towerCost = 60;
+  private resources = 150;
+  private readonly towerCost = 70;
   private useAltPath = false;
+  private lastReward = 0;
+  private lastRewardTimer = 0;
+  private sealPulseTimer = 0;
 
   private elapsed = 0;
   private wave = 1;
@@ -534,8 +559,25 @@ export default class GameScene extends Phaser.Scene {
     this.rift = new RiftHazard(this, { x: 520, y: 320 });
     this.sealKey = this.input.keyboard?.addKey('S');
 
+    this.placementGhost = this.add.sprite(0, 0, 'tower-ghost-bad');
+    this.placementGhost.setDepth(9);
+    this.placementGhost.setAlpha(0.75);
+    this.placementGhost.setVisible(false);
+
+    this.placementText = this.add.text(0, 0, '', {
+      fontSize: '12px',
+      color: '#e4e4ec',
+      fontFamily: 'Montserrat, sans-serif'
+    });
+    this.placementText.setDepth(9);
+    this.placementText.setVisible(false);
+
     this.input.on('pointerdown', (pointer: Phaser.Input.Pointer) => {
       this.tryPlaceTower({ x: pointer.worldX, y: pointer.worldY });
+    });
+
+    this.input.on('pointermove', (pointer: Phaser.Input.Pointer) => {
+      this.updatePlacementGhost({ x: pointer.worldX, y: pointer.worldY });
     });
 
     this.hudText = this.add.text(12, 12, 'Shadow Rift', {
@@ -552,15 +594,43 @@ export default class GameScene extends Phaser.Scene {
     });
     this.waveText.setOrigin(0.5, 0);
     this.waveText.setDepth(10);
+
+    this.waveInfoText = this.add.text(720, 12, '', {
+      fontSize: '14px',
+      color: '#c8d0ff',
+      fontFamily: 'Montserrat, sans-serif'
+    });
+    this.waveInfoText.setDepth(10);
+
+    this.sealBarBg = this.add.rectangle(480, 518, 360, 12, 0x202033, 0.9);
+    this.sealBarBg.setDepth(9);
+    this.sealBarFill = this.add.rectangle(300, 518, 0, 12, 0x7c3aed, 0.9);
+    this.sealBarFill.setOrigin(0, 0.5);
+    this.sealBarFill.setDepth(10);
   }
 
   update(_time: number, delta: number) {
     const dt = delta / 1000;
     this.elapsed += dt;
 
+    this.lastRewardTimer = Math.max(0, this.lastRewardTimer - dt);
+
     if (this.rift) {
       const channeling = !!this.sealKey && this.sealKey.isDown;
       this.rift.update(dt, channeling);
+      if (this.sealBarFill && this.sealBarBg) {
+        const progress = this.rift.getSealProgress();
+        const width = 360 * progress;
+        this.sealBarFill.width = width;
+        this.sealBarFill.fillColor = this.rift.isSealed() ? 0x52ffa8 : 0x7c3aed;
+      }
+      if (channeling && !this.rift.isSealed()) {
+        this.sealPulseTimer -= dt;
+        if (this.sealPulseTimer <= 0) {
+          this.spawnSealPulse();
+          this.sealPulseTimer = 0.35;
+        }
+      }
     }
 
     this.updateWaves(dt);
@@ -580,8 +650,14 @@ export default class GameScene extends Phaser.Scene {
       const seal = this.rift ? (this.rift.isSealed() ? 'sealed' : `${Math.round(this.rift.getSealProgress() * 100)}%`) : 'n/a';
       const cd = this.pendingSpawns > 0 ? `spawning` : `${this.waveCooldown.toFixed(1)}s`;
       this.hudText.setText(
-        `Wave ${this.wave}\nNext wave: ${cd}\nEnemies: ${this.enemies.length}\nTowers: ${this.towers.length}\nResources: ${this.resources} (cost ${this.towerCost})\nRift seal: ${seal}\nClick to place tower\nHold [S] to seal`
+        `Wave ${this.wave}\nNext wave: ${cd}\nEnemies: ${this.enemies.length}\nTowers: ${this.towers.length}\nResources: ${this.resources} (cost ${this.towerCost})${
+          this.lastRewardTimer > 0 ? ` [+${this.lastReward}]` : ''
+        }\nRift seal: ${seal}\nClick to place tower\nHold [S] to seal`
       );
+    }
+
+    if (this.waveInfoText) {
+      this.waveInfoText.setText(this.describeNextWave());
     }
   }
 
@@ -648,6 +724,13 @@ export default class GameScene extends Phaser.Scene {
     return 'hound';
   }
 
+  private describeNextWave() {
+    const spec = this.buildWaveSpec(this.wave);
+    const entries = Object.entries(spec.weights).filter(([, w]) => w > 0) as [EnemyKind, number][];
+    const parts = entries.map(([k, w]) => `${k}:${w}`);
+    return `Next wave: ${parts.join(' | ')}`;
+  }
+
   private spawnEnemy(kind: EnemyKind, startProgress = 0) {
     const enemy = new EnemyUnit(
       this,
@@ -695,16 +778,67 @@ export default class GameScene extends Phaser.Scene {
   }
 
   private tryPlaceTower(pos: Point) {
-    if (pos.x < 20 || pos.x > 940 || pos.y < 20 || pos.y > 520) return;
-    if (this.resources < this.towerCost) return;
-    const blocked = this.towers.some((t) => t.getPosition().distance(new Phaser.Math.Vector2(pos.x, pos.y)) < 50);
-    if (blocked) return;
+    const check = this.isPlacementAllowed(pos);
+    if (!check.valid) return;
     this.towers.push(new Tower(this, pos));
     this.resources -= this.towerCost;
+    this.flashPlacement(pos);
+  }
+
+  private isPlacementAllowed(pos: Point) {
+    if (pos.x < 30 || pos.x > 930 || pos.y < 30 || pos.y > 510) {
+      return { valid: false, reason: 'out-of-bounds' };
+    }
+    if (this.resources < this.towerCost) {
+      return { valid: false, reason: 'no-resources' };
+    }
+    const pt = new Phaser.Math.Vector2(pos.x, pos.y);
+    if (this.pathManager.distanceToPath(pt) < 34) {
+      return { valid: false, reason: 'too-close-to-path' };
+    }
+    if (this.rift && pt.distance(this.rift.getPosition()) < 90) {
+      return { valid: false, reason: 'near-rift' };
+    }
+    const blocked = this.towers.some((t) => t.getPosition().distance(pt) < 56);
+    if (blocked) {
+      return { valid: false, reason: 'too-close-to-tower' };
+    }
+    return { valid: true, reason: '' };
+  }
+
+  private updatePlacementGhost(pos: Point) {
+    if (!this.placementGhost || !this.placementText) return;
+    this.placementGhost.setVisible(true);
+    this.placementText.setVisible(true);
+    this.placementGhost.setPosition(pos.x, pos.y);
+    this.placementText.setPosition(pos.x + 28, pos.y - 12);
+
+    const check = this.isPlacementAllowed(pos);
+    const texture = check.valid ? 'tower-ghost-ok' : 'tower-ghost-bad';
+    this.placementGhost.setTexture(texture);
+    this.placementGhost.setAlpha(check.valid ? 0.9 : 0.6);
+    this.placementText.setText(check.valid ? `Place (${this.towerCost})` : 'Blocked');
+    this.placementText.setColor(check.valid ? '#88ffb7' : '#ff6b6b');
+  }
+
+  private flashPlacement(pos: Point) {
+    const circle = this.add.circle(pos.x, pos.y, 6, 0x88ffb7, 0.5);
+    circle.setDepth(8);
+    this.tweens.add({ targets: circle, radius: 40, alpha: 0, duration: 280, onComplete: () => circle.destroy() });
+  }
+
+  private spawnSealPulse() {
+    if (!this.rift) return;
+    const pos = this.rift.getPosition();
+    const ring = this.add.circle(pos.x, pos.y, 24, 0x7c3aed, 0.25);
+    ring.setDepth(5);
+    this.tweens.add({ targets: ring, radius: 120, alpha: 0, duration: 420, onComplete: () => ring.destroy() });
   }
 
   private addResources(amount: number) {
     this.resources += amount;
+    this.lastReward = amount;
+    this.lastRewardTimer = 1.6;
   }
 
   private drawBackdrop() {
@@ -736,5 +870,7 @@ export default class GameScene extends Phaser.Scene {
     this.useAltPath = !this.useAltPath;
     const points = this.useAltPath ? this.buildAltPath() : this.buildPath();
     this.pathManager.setPoints(points);
+    this.cameras.main.flash(200, 124, 58, 237);
+    this.alertWave('Path shifted!');
   }
 }

@@ -64,13 +64,15 @@ Design snapshot for enemies and rift mechanics (original IP, 80s horror-inspired
 ### Controls
 
 - Hold `S` to channel and seal the active rift (reduces slow aura once sealed).
-- Click to place an extra tower (cost shown in HUD; blocked if too close to another tower).
+- Move mouse to preview tower placement; green outline = valid. Red means blocked (path, rift, spacing, bounds).
+- Click to place an extra tower (cost shown in HUD; blocked if too close to another tower or the path/rift).
 
 ### Current Gameplay Pass
 
 - Wave loop with alerts, mixed enemy roster, and placeholder towers plus player-placed towers via clicks.
-- Behaviors: Hounds gain brief speed bursts when hit; Puppeteers toggle speed/regen aura; Swarms cap damage per hit; Brutes smash towers in melee; Watchers blink forward, emit aura, and summon Hounds while forcing path swaps.
-- Rift hazard applies local slow until sealed; sealing progress is shown in the HUD.
+- Behaviors: Hounds gain brief speed bursts when hit; Puppeteers toggle speed/regen aura; Swarms cap damage per hit; Brutes smash towers in melee; Watchers blink forward, emit aura, summon Hounds, and force path swaps.
+- Rift hazard applies local slow until sealed; sealing progress is shown in the HUD with a bar and channel pulses.
+- HUD shows next-wave weights, last kill reward, resources, and seal status; path shifts are telegraphed with flashes.
 
 ## Immediate Roadmap
 

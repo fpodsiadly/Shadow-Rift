@@ -1,3 +1,4 @@
+/* eslint-disable import/no-named-as-default-member */
 import Phaser from 'phaser';
 
 export default class BootScene extends Phaser.Scene {
@@ -14,8 +15,11 @@ export default class BootScene extends Phaser.Scene {
     const towerColor = 0x88ddee;
     const bulletColor = 0xf7e27d;
     const riftColor = 0x7c3aed;
+    const ghostOk = 0x88ffb7;
+    const ghostBad = 0xff6b6b;
 
-    const g = this.make.graphics({ x: 0, y: 0, add: false });
+    const g = this.add.graphics({ x: 0, y: 0 });
+    g.setVisible(false);
 
     g.fillStyle(houndColor, 1);
     g.fillCircle(16, 16, 16);
@@ -56,6 +60,16 @@ export default class BootScene extends Phaser.Scene {
     g.lineStyle(3, riftColor, 0.9);
     g.strokeCircle(24, 24, 20);
     g.generateTexture('rift', 48, 48);
+    g.clear();
+
+    g.lineStyle(3, ghostOk, 0.8);
+    g.strokeRoundedRect(0, 0, 40, 40, 8);
+    g.generateTexture('tower-ghost-ok', 40, 40);
+    g.clear();
+
+    g.lineStyle(3, ghostBad, 0.8);
+    g.strokeRoundedRect(0, 0, 40, 40, 8);
+    g.generateTexture('tower-ghost-bad', 40, 40);
     g.clear();
   }
 
