@@ -2,6 +2,12 @@
 
 Design snapshot for enemies and rift mechanics (original IP, 80s horror-inspired).
 
+## Stack
+
+- TypeScript + Phaser 3 (gameplay/rendering)
+- Vite (dev server and production build)
+- ESLint (linting) and npm scripts (`dev`, `build`, `lint`)
+
 ## Game Pillars
 
 - Tactical defense: path control, tower placement pressure, priority targets.

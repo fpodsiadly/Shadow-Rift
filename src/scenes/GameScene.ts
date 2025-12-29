@@ -1,425 +1,19 @@
 /* eslint-disable import/no-named-as-default-member */
 import Phaser from 'phaser';
 
+import { EnemyKind, EnemyUnit, AuraInfo } from '../game/enemies';
 import { Bullet, Tower, TOWER_COLOR, TOWER_CONFIG, TowerType } from '../game/towers';
-
-type EnemyKind = 'hound' | 'puppet' | 'swarm' | 'brute' | 'watcher';
-type EnemyState = 'advance' | 'dead';
-type AuraMode = 'speed' | 'regen';
-type Point = { x: number; y: number };
-
-type EnemyConfig = {
-  texture: string;
-  speed: number;
-  hp: number;
-  reward?: number;
-  speedBoostMultiplier?: number;
-  speedBoostDuration?: number;
-  auraRadius?: number;
-  auraToggle?: number;
-  speedBuff?: number;
-  regenPerSecond?: number;
-  aoeCap?: number;
-  towerDamage?: number;
-  towerRange?: number;
-  attackCooldown?: number;
-  blinkInterval?: number;
-  blinkDistance?: number;
-  summonInterval?: number;
-  summonCount?: number;
-};
-
-type AuraInfo = {
-  pos: Phaser.Math.Vector2;
-  radius: number;
-  mode: AuraMode;
-  speedMult: number;
-  regenPerSecond: number;
-};
-
-const ENEMY_CONFIG: Record<EnemyKind, EnemyConfig> = {
-  hound: {
-    texture: 'enemy-hound',
-    speed: 120,
-    hp: 42,
-    reward: 8,
-    speedBoostMultiplier: 2,
-    speedBoostDuration: 0.8
-  },
-  puppet: {
-    texture: 'enemy-puppet',
-    speed: 60,
-    hp: 180,
-    reward: 18,
-    auraRadius: 180,
-    auraToggle: 4,
-    speedBuff: 1.25,
-    regenPerSecond: 6
-  },
-  swarm: {
-    texture: 'enemy-swarm',
-    speed: 95,
-    hp: 65,
-    reward: 6,
-    aoeCap: 10
-  },
-  brute: {
-    texture: 'enemy-brute',
-    speed: 70,
-    hp: 320,
-    reward: 25,
-    towerDamage: 26,
-    towerRange: 70,
-    attackCooldown: 1.6
-  },
-  watcher: {
-    texture: 'enemy-puppet',
-    speed: 52,
-    hp: 480,
-    reward: 120,
-    auraRadius: 210,
-    auraToggle: 3,
-    speedBuff: 1.12,
-    regenPerSecond: 8,
-    blinkInterval: 5,
-    blinkDistance: 0.1,
-    summonInterval: 7,
-    summonCount: 2
-  }
-};
-
-
-class PathManager {
-  readonly path: Phaser.Curves.Path;
-  length: number;
-  private readonly graphics: Phaser.GameObjects.Graphics;
-  private readonly markers: Phaser.GameObjects.Arc[] = [];
-
-  constructor(scene: Phaser.Scene, points: Point[]) {
-    if (points.length < 2) {
-      throw new Error('Path requires at least two points.');
-    }
-
-    this.path = new Phaser.Curves.Path(points[0].x, points[0].y);
-    points.slice(1).forEach((p) => this.path.lineTo(p.x, p.y));
-    this.length = this.path.getLength();
-
-    this.graphics = scene.add.graphics();
-    this.graphics.lineStyle(2, 0x4c5176, 0.8);
-    this.path.draw(this.graphics, 64);
-
-    points.forEach((p) => {
-      const marker = scene.add.circle(p.x, p.y, 4, 0x9aa6ff, 0.9);
-      marker.setDepth(1);
-      this.markers.push(marker);
-    });
-  }
-
-  getPoint(t: number): Phaser.Math.Vector2 {
-    return this.path.getPoint(t);
-  }
-
-  distanceToPath(point: Phaser.Math.Vector2, samples = 80): number {
-    let min = Number.MAX_VALUE;
-    for (let i = 0; i <= samples; i += 1) {
-      const t = i / samples;
-      const p = this.path.getPoint(t);
-      const d = Phaser.Math.Distance.BetweenPoints(point, p);
-      if (d < min) min = d;
-    }
-    return min;
-  }
-
-  setPoints(points: Point[]) {
-    this.graphics.clear();
-    this.markers.forEach((m) => m.destroy());
-    this.markers.length = 0;
-
-    const nextPath = new Phaser.Curves.Path(points[0].x, points[0].y);
-    points.slice(1).forEach((p) => nextPath.lineTo(p.x, p.y));
-    // Replace curves on the existing Path instance so dependents retain their reference.
-    // eslint-disable-next-line @typescript-eslint/ban-ts-comment
-    // @ts-ignore
-    this.path.curves = nextPath.curves;
-    // eslint-disable-next-line @typescript-eslint/ban-ts-comment
-    // @ts-ignore
-    this.path.cacheLengths = nextPath.cacheLengths;
-    // eslint-disable-next-line @typescript-eslint/ban-ts-comment
-    // @ts-ignore
-    this.path.startPoint = nextPath.startPoint;
-    this.length = nextPath.getLength();
-
-    this.graphics.lineStyle(2, 0x4c5176, 0.8);
-    this.path.draw(this.graphics, 64);
-    points.forEach((p) => {
-      const marker = this.graphics.scene.add.circle(p.x, p.y, 4, 0x9aa6ff, 0.9);
-      marker.setDepth(1);
-      this.markers.push(marker);
-    });
-  }
-}
-
-class RiftHazard {
-  private readonly scene: Phaser.Scene;
-  private readonly pos: Phaser.Math.Vector2;
-  private readonly radius: number;
-  private readonly slowMultiplier: number;
-  private sealProgress = 0;
-  private sealed = false;
-  private readonly ring: Phaser.GameObjects.Image;
-  private readonly fog: Phaser.GameObjects.Ellipse;
-
-  constructor(scene: Phaser.Scene, pos: Point, radius = 140, slowMultiplier = 0.75) {
-    this.scene = scene;
-    this.pos = new Phaser.Math.Vector2(pos.x, pos.y);
-    this.radius = radius;
-    this.slowMultiplier = slowMultiplier;
-
-    this.ring = scene.add.image(pos.x, pos.y, 'rift');
-    this.ring.setDepth(4);
-
-    this.fog = scene.add.ellipse(pos.x, pos.y, radius * 1.8, radius * 1.8, 0x7c3aed, 0.09);
-    this.fog.setDepth(1);
-  }
-
-  update(dt: number, channeling: boolean) {
-    if (this.sealed) return;
-    const sealRate = 0.35;
-    const decayRate = 0.08;
-    if (channeling) {
-      this.sealProgress = Math.min(1, this.sealProgress + dt * sealRate);
-    } else {
-      this.sealProgress = Math.max(0, this.sealProgress - dt * decayRate);
-    }
-
-    if (this.sealProgress >= 1) {
-      this.sealed = true;
-      this.ring.setTint(0x52ffa8);
-      this.fog.setFillStyle(0x52ffa8, 0.06);
-    }
-
-    const alphaPulse = 0.06 + 0.04 * Math.sin(this.scene.time.now / 420);
-    this.fog.setAlpha(this.sealed ? 0.05 : alphaPulse + 0.04 * (1 - this.sealProgress));
-  }
-
-  getSpeedMultiplier(target: Phaser.Math.Vector2) {
-    if (this.sealed) return 1;
-    return target.distance(this.pos) <= this.radius ? this.slowMultiplier : 1;
-  }
-
-  isSealed() {
-    return this.sealed;
-  }
-
-  getSealProgress() {
-    return this.sealProgress;
-  }
-
-  getPosition() {
-    return this.pos.clone();
-  }
-}
-
-class EnemyUnit {
-  private readonly scene: Phaser.Scene;
-  private readonly path: PathManager;
-  private readonly sprite: Phaser.GameObjects.Sprite;
-  private readonly kind: EnemyKind;
-  private readonly cfg: EnemyConfig;
-  private readonly onDeath: (reward: number) => void;
-  private readonly spawnExtra: (kind: EnemyKind, progress?: number) => void;
-  private progress = 0;
-  private state: EnemyState = 'advance';
-  private hp: number;
-  private readonly maxHp: number;
-  private boostTimer = 0;
-  private auraMode: AuraMode = 'speed';
-  private auraTimer = 0;
-  private bruteCooldown = 0;
-  private blinkTimer = 0;
-  private summonTimer = 0;
-  private slowTimer = 0;
-  private slowFactor = 1;
-
-  constructor(
-    scene: Phaser.Scene,
-    path: PathManager,
-    kind: EnemyKind,
-    onDeath: (reward: number) => void,
-    spawnExtra: (kind: EnemyKind, progress?: number) => void,
-    startProgress = 0
-  ) {
-    this.scene = scene;
-    this.path = path;
-    this.kind = kind;
-    this.cfg = ENEMY_CONFIG[kind];
-    this.onDeath = onDeath;
-    this.spawnExtra = spawnExtra;
-    this.hp = this.cfg.hp;
-    this.maxHp = this.cfg.hp;
-    this.progress = startProgress;
-
-    const startPoint = this.path.getPoint(this.progress);
-    this.sprite = scene.add.sprite(startPoint.x, startPoint.y, this.cfg.texture);
-    this.sprite.setDepth(2);
-
-    if (kind === 'puppet' || kind === 'watcher') {
-      this.auraTimer = this.cfg.auraToggle ?? 0;
-    }
-    if (kind === 'watcher') {
-      this.blinkTimer = this.cfg.blinkInterval ?? 4;
-      this.summonTimer = this.cfg.summonInterval ?? 6;
-    }
-  }
-
-  update(dt: number, ctx: { auras: AuraInfo[]; rift?: RiftHazard; towers: Tower[]; pathLength: number }) {
-    if (this.state === 'dead') return;
-
-    const aura = this.pickAura(ctx.auras);
-    const speedBuff = aura && aura.mode === 'speed' ? aura.speedMult : 1;
-    const regen = aura && aura.mode === 'regen' ? aura.regenPerSecond : 0;
-    if (regen > 0) {
-      this.hp = Math.min(this.maxHp, this.hp + regen * dt);
-    }
-
-    if (this.kind === 'brute') {
-      this.attackNearbyTower(ctx.towers, dt);
-    }
-
-    if (this.kind === 'watcher') {
-      this.tickWatcher(dt);
-    }
-
-    if (this.boostTimer > 0) {
-      this.boostTimer -= dt;
-    }
-    if (this.slowTimer > 0) {
-      this.slowTimer -= dt;
-      if (this.slowTimer <= 0) {
-        this.slowFactor = 1;
-      }
-    }
-
-    const riftMultiplier = ctx.rift ? ctx.rift.getSpeedMultiplier(this.getPosition()) : 1;
-    const boostMultiplier = this.boostTimer > 0 ? this.cfg.speedBoostMultiplier ?? 1 : 1;
-    const speed = this.cfg.speed * speedBuff * riftMultiplier * boostMultiplier * this.slowFactor;
-
-    this.progress += (speed * dt) / ctx.pathLength;
-    if (this.progress >= 1) {
-      this.destroy();
-      return;
-    }
-
-    const point = this.path.getPoint(this.progress);
-    this.sprite.setPosition(point.x, point.y);
-  }
-
-  tickAura(dt: number): AuraInfo | null {
-    if (this.state === 'dead' || (this.kind !== 'puppet' && this.kind !== 'watcher')) return null;
-    this.auraTimer -= dt;
-    if (this.auraTimer <= 0) {
-      this.auraMode = this.auraMode === 'speed' ? 'regen' : 'speed';
-      this.auraTimer = this.cfg.auraToggle ?? 0;
-    }
-    return {
-      pos: this.getPosition(),
-      radius: this.cfg.auraRadius ?? 0,
-      mode: this.auraMode,
-      speedMult: this.cfg.speedBuff ?? 1,
-      regenPerSecond: this.cfg.regenPerSecond ?? 0
-    };
-  }
-
-  takeDamage(amount: number) {
-    if (this.state === 'dead') return;
-    const capped = this.cfg.aoeCap ? Math.min(amount, this.cfg.aoeCap) : amount;
-    this.hp -= capped;
-    if (this.kind === 'hound') {
-      this.boostTimer = this.cfg.speedBoostDuration ?? 0;
-    }
-    if (this.hp <= 0) {
-      this.destroy();
-    }
-  }
-
-  applySlow(percent: number, duration: number) {
-    if (percent <= 0 || duration <= 0) return;
-    const factor = Math.max(0.2, 1 - percent);
-    if (factor < this.slowFactor || this.slowTimer <= 0) {
-      this.slowFactor = factor;
-      this.slowTimer = duration;
-    } else if (factor === this.slowFactor) {
-      this.slowTimer = Math.max(this.slowTimer, duration);
-    }
-  }
-
-  private attackNearbyTower(towers: Tower[], dt: number) {
-    this.bruteCooldown -= dt;
-    if (this.bruteCooldown > 0) return;
-    const origin = this.getPosition();
-    const towerRange = this.cfg.towerRange ?? 0;
-    const towerDamage = this.cfg.towerDamage ?? 0;
-    const tower = towers.find((t) => !t.isDestroyed() && origin.distance(t.getPosition()) <= towerRange);
-    if (tower) {
-      tower.takeDamage(towerDamage);
-      this.bruteCooldown = this.cfg.attackCooldown ?? 1.5;
-    }
-  }
-
-  private tickWatcher(dt: number) {
-    this.blinkTimer -= dt;
-    this.summonTimer -= dt;
-
-    if (this.blinkTimer <= 0) {
-      const step = this.cfg.blinkDistance ?? 0.1;
-      this.progress = Math.min(0.97, this.progress + step);
-      const point = this.path.getPoint(this.progress);
-      this.sprite.setPosition(point.x, point.y);
-      this.blinkTimer = this.cfg.blinkInterval ?? 4.5;
-      const ripple = this.scene.add.circle(point.x, point.y, 8, 0x7c3aed, 0.35);
-      ripple.setDepth(5);
-      this.scene.tweens.add({ targets: ripple, radius: 50, alpha: 0, duration: 320, onComplete: () => ripple.destroy() });
-    }
-
-    if (this.summonTimer <= 0) {
-      const count = this.cfg.summonCount ?? 2;
-      const base = Math.max(0, this.progress - 0.04);
-      for (let i = 0; i < count; i += 1) {
-        this.spawnExtra('hound', base);
-      }
-      this.summonTimer = this.cfg.summonInterval ?? 6;
-    }
-  }
-
-  private pickAura(auras: AuraInfo[]): AuraInfo | null {
-    const pos = this.getPosition();
-    for (const aura of auras) {
-      if (pos.distance(aura.pos) <= aura.radius) return aura;
-    }
-    return null;
-  }
-
-  destroy() {
-    if (this.state === 'dead') return;
-    this.state = 'dead';
-    this.sprite.destroy();
-    this.onDeath(this.cfg.reward ?? 0);
-  }
-
-  isDead() {
-    return this.state === 'dead';
-  }
-
-  getPosition(): Phaser.Math.Vector2 {
-    return this.sprite.getCenter();
-  }
-}
+import { buildWaveSpec, describeNextWave, pickKind } from '../game/waves';
+import { buildAltPath, buildPath, PathManager, Point, RiftHazard } from '../game/world';
 
 export default class GameScene extends Phaser.Scene {
   private pathManager!: PathManager;
   private enemies: EnemyUnit[] = [];
   private towers: Tower[] = [];
   private bullets: Bullet[] = [];
+  private selectedTower: Tower | null = null;
+  private rangeCircle?: Phaser.GameObjects.Arc;
+  private nextRangeCircle?: Phaser.GameObjects.Arc;
   private hudText?: Phaser.GameObjects.Text;
   private waveText?: Phaser.GameObjects.Text;
   private waveInfoText?: Phaser.GameObjects.Text;
@@ -427,9 +21,20 @@ export default class GameScene extends Phaser.Scene {
   private sealBarFill?: Phaser.GameObjects.Rectangle;
   private placementGhost?: Phaser.GameObjects.Sprite;
   private placementText?: Phaser.GameObjects.Text;
+  private typeButtons: Array<{ type: TowerType; box: Phaser.GameObjects.Rectangle; label: Phaser.GameObjects.Text; cost: Phaser.GameObjects.Text }> = [];
+  private typeButtonsBg?: Phaser.GameObjects.Rectangle;
+  private towerPanel?: {
+    bg: Phaser.GameObjects.Rectangle;
+    text: Phaser.GameObjects.Text;
+    button: Phaser.GameObjects.Rectangle;
+    buttonText: Phaser.GameObjects.Text;
+    sellButton: Phaser.GameObjects.Rectangle;
+    sellText: Phaser.GameObjects.Text;
+  };
   private rift?: RiftHazard;
   private sealKey?: Phaser.Input.Keyboard.Key;
-  private resources = 150;
+  private upgradeKey?: Phaser.Input.Keyboard.Key;
+  private resources = 220;
   private selectedTowerType: TowerType = 'basic';
   private typeKeys?: Partial<Record<TowerType, Phaser.Input.Keyboard.Key>>;
   private useAltPath = false;
@@ -450,7 +55,7 @@ export default class GameScene extends Phaser.Scene {
 
   create() {
     this.drawBackdrop();
-    this.pathManager = new PathManager(this, this.buildPath());
+    this.pathManager = new PathManager(this, buildPath());
     this.towers = this.buildTowers();
     this.rift = new RiftHazard(this, { x: 520, y: 320 });
     this.sealKey = this.input.keyboard?.addKey('S');
@@ -475,14 +80,20 @@ export default class GameScene extends Phaser.Scene {
       sniper: this.input.keyboard?.addKey('FOUR') as Phaser.Input.Keyboard.Key
     };
 
+    this.upgradeKey = this.input.keyboard?.addKey('U') as Phaser.Input.Keyboard.Key;
+    this.buildTowerPanel();
+    this.buildTypeSelector();
+
     this.input.on('pointerdown', (pointer: Phaser.Input.Pointer) => {
       const pos = { x: pointer.worldX, y: pointer.worldY };
+      if (this.isPointerOverPanel(pos)) return;
       const targetTower = this.findTowerAt(pos);
       if (targetTower) {
-        this.tryUpgradeTower(targetTower, pos);
-      } else {
-        this.tryPlaceTower(pos);
+        this.selectTower(targetTower);
+        return;
       }
+      this.clearSelection();
+      this.tryPlaceTower(pos);
     });
 
     this.input.on('pointermove', (pointer: Phaser.Input.Pointer) => {
@@ -523,6 +134,7 @@ export default class GameScene extends Phaser.Scene {
     this.elapsed += dt;
 
     this.handleTypeHotkeys();
+    this.handleUpgradeHotkey();
 
     this.lastRewardTimer = Math.max(0, this.lastRewardTimer - dt);
 
@@ -553,6 +165,10 @@ export default class GameScene extends Phaser.Scene {
 
     this.towers.forEach((t) => t.update(dt, this.enemies, this.bullets));
     this.towers = this.towers.filter((t) => !t.isDestroyed());
+    if (this.selectedTower && this.selectedTower.isDestroyed()) {
+      this.clearSelection();
+    }
+    this.updateTowerPanel();
 
     this.bullets.forEach((b) => b.update(dt));
     this.bullets = this.bullets.filter((b) => b.isAlive());
@@ -564,7 +180,7 @@ export default class GameScene extends Phaser.Scene {
       this.hudText.setText(
         `Wave ${this.wave}\nNext wave: ${cd}\nEnemies: ${this.enemies.length}\nTowers: ${this.towers.length}\nResources: ${this.resources} (cost ${cost})${
           this.lastRewardTimer > 0 ? ` [+${this.lastReward}]` : ''
-        }\nRift seal: ${seal}\nType: ${this.selectedTowerType} [1-4]\nClick to place | click tower to upgrade\nHold [S] to seal`
+        }\nRift seal: ${seal}\nType: ${this.selectedTowerType} [1-4]\nClick to place | click tower to inspect (U to upgrade)\nHold [S] to seal`
       );
     }
 
@@ -610,37 +226,15 @@ export default class GameScene extends Phaser.Scene {
   }
 
   private buildWaveSpec(wave: number) {
-    const count = 6 + Math.floor(wave * 2.4);
-    const interval = Math.max(0.55, 1 - wave * 0.05);
-    const rest = Math.max(4, 7 - wave * 0.15);
-    const weights: Record<EnemyKind, number> = {
-      hound: 6,
-      swarm: Math.max(2, wave - 1),
-      puppet: wave >= 3 ? 1 : 0,
-      brute: wave >= 4 ? 1 : 0,
-      watcher: wave >= 6 && wave % 3 === 0 ? 1 : 0
-    };
-    return { count, interval, rest, weights };
+    return buildWaveSpec(wave);
   }
 
   private pickKind(): EnemyKind {
-    const spec = this.buildWaveSpec(this.wave - 1);
-    const entries = Object.entries(spec.weights) as [EnemyKind, number][];
-    const total = entries.reduce((sum, [, w]) => sum + w, 0);
-    const r = Math.random() * total;
-    let acc = 0;
-    for (const [kind, w] of entries) {
-      acc += w;
-      if (r <= acc) return kind;
-    }
-    return 'hound';
+    return pickKind(this.wave);
   }
 
   private describeNextWave() {
-    const spec = this.buildWaveSpec(this.wave);
-    const entries = Object.entries(spec.weights).filter(([, w]) => w > 0) as [EnemyKind, number][];
-    const parts = entries.map(([k, w]) => `${k}:${w}`);
-    return `Next wave: ${parts.join(' | ')}`;
+    return describeNextWave(this.wave);
   }
 
   private spawnEnemy(kind: EnemyKind, startProgress = 0) {
@@ -658,28 +252,6 @@ export default class GameScene extends Phaser.Scene {
     }
   }
 
-  private buildPath(): Point[] {
-    return [
-      { x: 64, y: 480 },
-      { x: 200, y: 420 },
-      { x: 340, y: 420 },
-      { x: 520, y: 320 },
-      { x: 700, y: 360 },
-      { x: 860, y: 200 }
-    ];
-  }
-
-  private buildAltPath(): Point[] {
-    return [
-      { x: 64, y: 420 },
-      { x: 220, y: 320 },
-      { x: 400, y: 360 },
-      { x: 620, y: 260 },
-      { x: 780, y: 320 },
-      { x: 880, y: 160 }
-    ];
-  }
-
   private buildTowers() {
     const placements: Point[] = [
       { x: 260, y: 340 },
@@ -692,28 +264,46 @@ export default class GameScene extends Phaser.Scene {
   private tryPlaceTower(pos: Point) {
     const check = this.isPlacementAllowed(pos);
     if (!check.valid) return;
-    this.towers.push(new Tower(this, pos, this.selectedTowerType));
+    const tower = new Tower(this, pos, this.selectedTowerType);
+    this.towers.push(tower);
     this.resources -= this.getSelectedCost();
+    this.updateTypeSelectorHighlight();
     this.flashPlacement(pos);
     this.showPopup(pos, `Built ${this.selectedTowerType}`, '#9ef7c2');
+    this.selectTower(tower);
   }
 
-  private tryUpgradeTower(tower: Tower, pos: Point) {
+  private tryUpgradeTower(tower: Tower, pos: Point): boolean {
     const nextCost = tower.getNextCost();
     if (nextCost === null) {
       this.showPopup(pos, 'Max level', '#d4d4d8');
-      return;
+      return false;
     }
     if (this.resources < nextCost) {
       this.showPopup(pos, `Need ${nextCost}`, '#ff8a8a');
-      return;
+      return false;
     }
-    const upgraded = tower.upgrade();
+    const upgraded = tower.upgrade(nextCost);
     if (upgraded) {
       this.resources -= nextCost;
+      this.updateTypeSelectorHighlight();
       this.flashPlacement(pos);
       this.showPopup(pos, `Level ${tower.getLevel()}`, '#9ef7c2');
+      return true;
     }
+    return false;
+  }
+
+  private trySellTower(tower: Tower) {
+    const value = tower.getSellValue(0.7);
+    const pos = tower.getPosition();
+    tower.destroyTower();
+    this.towers = this.towers.filter((t) => t !== tower);
+    this.resources += value;
+    this.updateTypeSelectorHighlight();
+    this.flashPlacement({ x: pos.x, y: pos.y });
+    this.showPopup({ x: pos.x, y: pos.y }, `Sold +${value}`, '#9ef7c2');
+    this.clearSelection();
   }
 
   private isPlacementAllowed(pos: Point) {
@@ -744,16 +334,11 @@ export default class GameScene extends Phaser.Scene {
     this.placementText.setPosition(pos.x + 28, pos.y - 12);
 
     if (tower) {
-      const next = tower.getNextCost();
+      const levelInfo = `Lv ${tower.getLevel()} ${tower.getType()}`;
       this.placementGhost.setVisible(false);
       this.placementText.setVisible(true);
-      if (next === null) {
-        this.placementText.setText('Max level');
-        this.placementText.setColor('#d4d4d8');
-      } else {
-        this.placementText.setText(`Upgrade (${next})`);
-        this.placementText.setColor(this.resources >= next ? '#f2f09e' : '#ff8a8a');
-      }
+      this.placementText.setText(levelInfo);
+      this.placementText.setColor('#c8d0ff');
       return;
     }
 
@@ -775,15 +360,284 @@ export default class GameScene extends Phaser.Scene {
 
   private handleTypeHotkeys() {
     if (!this.typeKeys) return;
-    if (this.typeKeys.basic && Phaser.Input.Keyboard.JustDown(this.typeKeys.basic)) this.selectedTowerType = 'basic';
-    if (this.typeKeys.slow && Phaser.Input.Keyboard.JustDown(this.typeKeys.slow)) this.selectedTowerType = 'slow';
-    if (this.typeKeys.splash && Phaser.Input.Keyboard.JustDown(this.typeKeys.splash)) this.selectedTowerType = 'splash';
-    if (this.typeKeys.sniper && Phaser.Input.Keyboard.JustDown(this.typeKeys.sniper)) this.selectedTowerType = 'sniper';
+    if (this.typeKeys.basic && Phaser.Input.Keyboard.JustDown(this.typeKeys.basic)) this.setSelectedTowerType('basic');
+    if (this.typeKeys.slow && Phaser.Input.Keyboard.JustDown(this.typeKeys.slow)) this.setSelectedTowerType('slow');
+    if (this.typeKeys.splash && Phaser.Input.Keyboard.JustDown(this.typeKeys.splash)) this.setSelectedTowerType('splash');
+    if (this.typeKeys.sniper && Phaser.Input.Keyboard.JustDown(this.typeKeys.sniper)) this.setSelectedTowerType('sniper');
+  }
+
+  private setSelectedTowerType(type: TowerType) {
+    if (this.selectedTowerType === type) {
+      this.updateTypeSelectorHighlight();
+      return;
+    }
+    this.selectedTowerType = type;
+    this.updateTypeSelectorHighlight();
+  }
+
+  private handleUpgradeHotkey() {
+    if (!this.upgradeKey || !this.selectedTower) return;
+    if (Phaser.Input.Keyboard.JustDown(this.upgradeKey)) {
+      this.tryUpgradeSelected();
+    }
   }
 
   private findTowerAt(pos: Point): Tower | null {
     const pt = new Phaser.Math.Vector2(pos.x, pos.y);
     return this.towers.find((t) => t.getPosition().distance(pt) < 26) ?? null;
+  }
+
+  private selectTower(tower: Tower) {
+    this.selectedTower = tower;
+    this.refreshRangeIndicators(tower);
+    this.updateTowerPanel(true);
+  }
+
+  private clearSelection() {
+    this.selectedTower = null;
+    this.hideRangeIndicators();
+    if (!this.towerPanel) return;
+    this.towerPanel.bg.setVisible(false);
+    this.towerPanel.text.setVisible(false);
+    this.towerPanel.button.setVisible(false);
+    this.towerPanel.buttonText.setVisible(false);
+    this.towerPanel.sellButton.setVisible(false);
+    this.towerPanel.sellText.setVisible(false);
+  }
+
+  private buildTowerPanel() {
+    const width = 260;
+    const height = 120;
+    const x = 820;
+    const y = 420;
+    const bg = this.add.rectangle(x, y, width, height, 0x11121f, 0.9).setStrokeStyle(2, 0x2f3148, 0.95);
+    bg.setDepth(12);
+
+    const text = this.add.text(x - width / 2 + 12, y - height / 2 + 10, '', {
+      fontSize: '13px',
+      color: '#e4e4ec',
+      fontFamily: 'Montserrat, sans-serif'
+    });
+    text.setDepth(13);
+
+    const button = this.add.rectangle(x, y + 32, width - 24, 28, 0x25273a, 0.95).setStrokeStyle(2, 0x40435c, 0.9);
+    button.setDepth(13);
+    button.setInteractive({ useHandCursor: true });
+    button.on('pointerdown', (pointer: Phaser.Input.Pointer) => {
+      // Prevent world click handling from firing when hitting the button.
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (pointer.event as any)?.stopPropagation?.();
+      this.tryUpgradeSelected();
+    });
+
+    const buttonText = this.add.text(button.x, button.y, 'Upgrade', {
+      fontSize: '13px',
+      color: '#f2f09e',
+      fontFamily: 'Montserrat, sans-serif'
+    });
+    buttonText.setOrigin(0.5, 0.5);
+    buttonText.setDepth(14);
+
+    const sellButton = this.add.rectangle(x, y + 70, width - 24, 26, 0x25273a, 0.95).setStrokeStyle(2, 0x40435c, 0.9);
+    sellButton.setDepth(13);
+    sellButton.setInteractive({ useHandCursor: true });
+    sellButton.on('pointerdown', (pointer: Phaser.Input.Pointer) => {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (pointer.event as any)?.stopPropagation?.();
+      this.trySellSelected();
+    });
+
+    const sellText = this.add.text(sellButton.x, sellButton.y, 'Sell', {
+      fontSize: '12px',
+      color: '#ffd18a',
+      fontFamily: 'Montserrat, sans-serif'
+    });
+    sellText.setOrigin(0.5, 0.5);
+    sellText.setDepth(14);
+
+    this.towerPanel = { bg, text, button, buttonText, sellButton, sellText };
+    this.clearSelection();
+  }
+
+  private buildTypeSelector() {
+    const types: TowerType[] = ['basic', 'slow', 'splash', 'sniper'];
+    const centerX = 300;
+    const y = 506;
+    const spacing = 112;
+    const bgWidth = spacing * types.length + 24;
+
+    this.typeButtonsBg = this.add.rectangle(centerX, y, bgWidth, 48, 0x0f101c, 0.92).setStrokeStyle(1, 0x2f3148, 0.9);
+    this.typeButtonsBg.setDepth(10);
+
+    const startX = centerX - ((types.length - 1) * spacing) / 2;
+    types.forEach((type, idx) => {
+      const bx = startX + idx * spacing;
+      const box = this.add.rectangle(bx, y, 96, 34, 0x171827, 0.95).setStrokeStyle(2, TOWER_COLOR[type], 0.55);
+      box.setDepth(11);
+      box.setInteractive({ useHandCursor: true });
+      box.on('pointerdown', (pointer: Phaser.Input.Pointer) => {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        (pointer.event as any)?.stopPropagation?.();
+        this.setSelectedTowerType(type);
+      });
+
+      const label = this.add.text(bx - 42, y - 10, type, {
+        fontSize: '12px',
+        color: '#e4e4ec',
+        fontFamily: 'Montserrat, sans-serif'
+      });
+      label.setDepth(12);
+
+      const costVal = TOWER_CONFIG[type].levels[0].cost;
+      const cost = this.add.text(bx - 42, y + 4, `cost ${costVal}`, {
+        fontSize: '11px',
+        color: '#9ef7c2',
+        fontFamily: 'Montserrat, sans-serif'
+      });
+      cost.setDepth(12);
+
+      this.typeButtons.push({ type, box, label, cost });
+    });
+
+    this.updateTypeSelectorHighlight();
+  }
+
+  private tryUpgradeSelected() {
+    if (!this.selectedTower) return;
+    const pos = this.selectedTower.getPosition();
+    const prevRange = this.selectedTower.getStats().range;
+    const upgraded = this.tryUpgradeTower(this.selectedTower, { x: pos.x, y: pos.y });
+    if (upgraded) {
+      this.refreshRangeIndicators(this.selectedTower, prevRange);
+    }
+    this.updateTowerPanel();
+  }
+
+  private trySellSelected() {
+    if (!this.selectedTower) return;
+    this.trySellTower(this.selectedTower);
+  }
+
+  private updateTowerPanel(forceShow = false) {
+    if (!this.towerPanel) return;
+    const { bg, text, button, buttonText, sellButton, sellText } = this.towerPanel;
+    if (!this.selectedTower) {
+      this.clearSelection();
+      return;
+    }
+
+    const stats = this.selectedTower.getStats();
+    const nextStats = this.selectedTower.getNextStats();
+    const nextCost = this.selectedTower.getNextCost();
+    const type = this.selectedTower.getType();
+    const color = TOWER_COLOR[type] ?? 0xffffff;
+    const sellValue = this.selectedTower.getSellValue(0.7);
+
+    bg.setVisible(true).setFillStyle(0x11121f, 0.92);
+    text.setVisible(true);
+    button.setVisible(true);
+    buttonText.setVisible(true);
+    sellButton.setVisible(true);
+    sellText.setVisible(true);
+
+    const tags: string[] = [];
+    if (stats.splashRadius) tags.push(`Splash ${stats.splashRadius}`);
+    if (stats.slowPercent) tags.push(`Slow ${Math.round(stats.slowPercent * 100)}%`);
+    if (stats.critChance) tags.push(`Crit ${Math.round((stats.critChance ?? 0) * 100)}% x${stats.critMultiplier ?? 1}`);
+
+    text.setText(
+      `Tower: ${type} (Lv ${this.selectedTower.getLevel()})\n` +
+        `DMG ${stats.damage} | Rate ${stats.fireRate.toFixed(2)}s | Range ${stats.range}` +
+        (tags.length ? `\n${tags.join(' | ')}` : '')
+    );
+
+    if (nextCost === null || !nextStats) {
+      button.setFillStyle(0x20222f, 0.8);
+      buttonText.setText('Max level');
+      buttonText.setColor('#d4d4d8');
+      button.disableInteractive();
+    } else {
+      const affordable = this.resources >= nextCost;
+      button.setFillStyle(affordable ? 0x2f7b4a : 0x3a2c2c, 0.9);
+      buttonText.setText(`Upgrade ${nextCost} → Lv ${this.selectedTower.getLevel() + 1}`);
+      buttonText.setColor(affordable ? '#e9ffe0' : '#ffb7b7');
+      button.setInteractive({ useHandCursor: true });
+    }
+
+    sellButton.setFillStyle(0x2d2f44, 0.95);
+    sellButton.setStrokeStyle(2, 0x40435c, 0.9);
+    sellText.setText(`Sell +${sellValue}`);
+    sellText.setColor('#ffd18a');
+
+    // Subtle highlight per tower type.
+    bg.setStrokeStyle(2, color, 0.85);
+    button.setStrokeStyle(2, 0x40435c, 0.9);
+    sellButton.setStrokeStyle(2, color, 0.4);
+
+    if (forceShow) {
+      this.tweens.add({ targets: bg, alpha: { from: 0, to: 0.92 }, duration: 120 });
+    }
+  }
+
+  private refreshRangeIndicators(tower: Tower, prevRange?: number) {
+    const pos = tower.getPosition();
+    const color = TOWER_COLOR[tower.getType()] ?? 0xffffff;
+    const currentRange = tower.getStats().range;
+    const nextRange = tower.getNextStats()?.range ?? null;
+
+    if (!this.rangeCircle) {
+      this.rangeCircle = this.add.circle(pos.x, pos.y, currentRange, color, 0.06);
+      this.rangeCircle.setDepth(1);
+    }
+    this.rangeCircle.setVisible(true);
+    this.rangeCircle.setPosition(pos.x, pos.y);
+    this.rangeCircle.setFillStyle(color, 0.035);
+    this.rangeCircle.setStrokeStyle(2, color, 0.4);
+
+    if (prevRange !== undefined) {
+      this.rangeCircle.setRadius(prevRange);
+      this.tweens.add({ targets: this.rangeCircle, radius: currentRange, duration: 220, ease: 'Sine.easeOut' });
+    } else {
+      this.rangeCircle.setRadius(currentRange);
+    }
+
+    if (nextRange) {
+      if (!this.nextRangeCircle) {
+        this.nextRangeCircle = this.add.circle(pos.x, pos.y, nextRange, color, 0);
+        this.nextRangeCircle.setDepth(1);
+      }
+      this.nextRangeCircle.setVisible(true);
+      this.nextRangeCircle.setPosition(pos.x, pos.y);
+      this.nextRangeCircle.setRadius(nextRange);
+      this.nextRangeCircle.setStrokeStyle(2, color, 0.18);
+      this.nextRangeCircle.setFillStyle(color, 0);
+    } else if (this.nextRangeCircle) {
+      this.nextRangeCircle.setVisible(false);
+    }
+  }
+
+  private hideRangeIndicators() {
+    this.rangeCircle?.destroy();
+    this.nextRangeCircle?.destroy();
+    this.rangeCircle = undefined;
+    this.nextRangeCircle = undefined;
+  }
+
+  private updateTypeSelectorHighlight() {
+    if (!this.typeButtons.length) return;
+    this.typeButtons.forEach(({ type, box, label, cost }) => {
+      const selected = this.selectedTowerType === type;
+      const baseColor = TOWER_COLOR[type] ?? 0xffffff;
+      const affordable = this.resources >= TOWER_CONFIG[type].levels[0].cost;
+      box.setFillStyle(selected ? 0x202437 : 0x171827, selected ? 0.95 : 0.88);
+      box.setStrokeStyle(selected ? 3 : 1.5, baseColor, selected ? 0.9 : 0.55);
+      label.setColor(selected ? '#ffffff' : '#e4e4ec');
+      cost.setColor(affordable ? '#b0ffd6' : '#ff9f9f');
+      cost.setText(affordable ? `cost ${TOWER_CONFIG[type].levels[0].cost}` : `need ${TOWER_CONFIG[type].levels[0].cost}`);
+      box.setAlpha(affordable ? 1 : 0.75);
+      label.setAlpha(affordable ? 1 : 0.85);
+      cost.setAlpha(affordable ? 1 : 0.9);
+    });
   }
 
   private showPopup(pos: Point, text: string, color: string) {
@@ -794,6 +648,14 @@ export default class GameScene extends Phaser.Scene {
     });
     label.setDepth(11);
     this.tweens.add({ targets: label, y: label.y - 12, alpha: 0, duration: 600, onComplete: () => label.destroy() });
+  }
+
+  private isPointerOverPanel(pos: Point) {
+    if (!this.towerPanel || !this.towerPanel.bg.visible) return false;
+    const { bg } = this.towerPanel;
+    const halfW = bg.width / 2;
+    const halfH = bg.height / 2;
+    return pos.x >= bg.x - halfW && pos.x <= bg.x + halfW && pos.y >= bg.y - halfH && pos.y <= bg.y + halfH;
   }
 
   private flashPlacement(pos: Point) {
@@ -814,6 +676,7 @@ export default class GameScene extends Phaser.Scene {
     this.resources += amount;
     this.lastReward = amount;
     this.lastRewardTimer = 1.6;
+    this.updateTypeSelectorHighlight();
   }
 
   private drawBackdrop() {
@@ -843,7 +706,7 @@ export default class GameScene extends Phaser.Scene {
 
   private togglePath() {
     this.useAltPath = !this.useAltPath;
-    const points = this.useAltPath ? this.buildAltPath() : this.buildPath();
+    const points = this.useAltPath ? buildAltPath() : buildPath();
     this.pathManager.setPoints(points);
     this.cameras.main.flash(200, 124, 58, 237);
     this.alertWave('Path shifted!');
