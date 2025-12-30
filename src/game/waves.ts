@@ -3,7 +3,6 @@ import { EnemyKind } from './enemies';
 export const buildWaveSpec = (wave: number) => {
   const count = 5 + Math.floor(wave * 1.8);
   const interval = Math.max(0.75, 1.05 - wave * 0.04);
-  const rest = Math.max(5.5, 9 - wave * 0.12);
   const weights: Record<EnemyKind, number> = {
     hound: 6,
     swarm: Math.max(1, wave - 1),
@@ -11,7 +10,7 @@ export const buildWaveSpec = (wave: number) => {
     brute: wave >= 4 ? 1 : 0,
     watcher: wave >= 6 && wave % 3 === 0 ? 1 : 0
   };
-  return { count, interval, rest, weights };
+  return { count, interval, weights };
 };
 
 export const pickKind = (wave: number, buildSpec = buildWaveSpec): EnemyKind => {

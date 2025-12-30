@@ -1,10 +1,14 @@
 /* eslint-disable import/no-named-as-default-member */
 import Phaser from 'phaser';
 
+import { GAME_CONFIG, getTowerTint, TOWER_CONFIG } from '../config/gameConfig';
 import { EnemyKind, EnemyUnit, AuraInfo } from '../game/enemies';
-import { Bullet, Tower, TOWER_COLOR, TOWER_CONFIG, TowerType } from '../game/towers';
+import { PlacementManager } from '../game/placement';
+import { Bullet, Tower, TowerType } from '../game/towers';
 import { buildWaveSpec, describeNextWave, pickKind } from '../game/waves';
 import { buildAltPath, buildPath, PathManager, Point, RiftHazard } from '../game/world';
+import { buildStartWaveButton, StartButtonUi, updateStartButtonState } from '../ui/startButton';
+import { buildTypeSelector, TypeSelectorUi, updateTypeSelectorHighlight } from '../ui/typeSelector';
 
 export default class GameScene extends Phaser.Scene {
   private pathManager!: PathManager;
@@ -21,8 +25,9 @@ export default class GameScene extends Phaser.Scene {
   private sealBarFill?: Phaser.GameObjects.Rectangle;
   private placementGhost?: Phaser.GameObjects.Sprite;
   private placementText?: Phaser.GameObjects.Text;
-  private typeButtons: Array<{ type: TowerType; box: Phaser.GameObjects.Rectangle; label: Phaser.GameObjects.Text; cost: Phaser.GameObjects.Text }> = [];
-  private typeButtonsBg?: Phaser.GameObjects.Rectangle;
+  private placementManager!: PlacementManager;
+  private typeSelector?: TypeSelectorUi;
+  private startButton?: StartButtonUi;
   private towerPanel?: {
     bg: Phaser.GameObjects.Rectangle;
     text: Phaser.GameObjects.Text;
@@ -34,7 +39,9 @@ export default class GameScene extends Phaser.Scene {
   private rift?: RiftHazard;
   private sealKey?: Phaser.Input.Keyboard.Key;
   private upgradeKey?: Phaser.Input.Keyboard.Key;
-  private resources = 220;
+  private cancelKey?: Phaser.Input.Keyboard.Key;
+  private snapToggleKey?: Phaser.Input.Keyboard.Key;
+  private resources = GAME_CONFIG.startResources;
   private selectedTowerType: TowerType = 'basic';
   private typeKeys?: Partial<Record<TowerType, Phaser.Input.Keyboard.Key>>;
   private useAltPath = false;
@@ -44,10 +51,12 @@ export default class GameScene extends Phaser.Scene {
 
   private elapsed = 0;
   private wave = 1;
-  private waveCooldown = 3;
   private pendingSpawns = 0;
   private spawnTimer = 0;
   private spawnInterval = 1.1;
+  private buildPhase = true;
+  private buildTimer = GAME_CONFIG.buildPhaseDuration;
+  private interestRate = GAME_CONFIG.interestRate;
 
   constructor() {
     super({ key: 'GameScene' });
@@ -73,6 +82,26 @@ export default class GameScene extends Phaser.Scene {
     this.placementText.setDepth(9);
     this.placementText.setVisible(false);
 
+    this.placementManager = new PlacementManager({
+      scene: this,
+      pathManager: this.pathManager,
+      getRift: () => this.rift,
+      getTowers: () => this.towers,
+      getResources: () => this.resources,
+      spendResources: (amount) => {
+        this.resources -= amount;
+        this.updateTypeSelectorHighlight();
+      },
+      selectedType: () => this.selectedTowerType,
+      getSelectedCost: () => this.getSelectedCost(),
+      addTower: (tower) => this.towers.push(tower),
+      selectTower: (tower) => this.selectTower(tower),
+      flashPlacement: (p) => this.flashPlacement(p),
+      showPopup: (p, text, color) => this.showPopup(p, text, color),
+      findTowerAt: (p) => this.findTowerAt(p)
+    });
+    this.placementManager.setGhosts(this.placementGhost, this.placementText);
+
     this.typeKeys = {
       basic: this.input.keyboard?.addKey('ONE') as Phaser.Input.Keyboard.Key,
       slow: this.input.keyboard?.addKey('TWO') as Phaser.Input.Keyboard.Key,
@@ -81,11 +110,19 @@ export default class GameScene extends Phaser.Scene {
     };
 
     this.upgradeKey = this.input.keyboard?.addKey('U') as Phaser.Input.Keyboard.Key;
+    this.cancelKey = this.input.keyboard?.addKey('ESC') as Phaser.Input.Keyboard.Key;
+    this.snapToggleKey = this.input.keyboard?.addKey('G') as Phaser.Input.Keyboard.Key;
     this.buildTowerPanel();
-    this.buildTypeSelector();
+    this.typeSelector = buildTypeSelector(this, (t) => this.setSelectedTowerType(t));
+    this.startButton = buildStartWaveButton(this, () => this.startNextWaveEarly());
+    this.updateStartButtonState();
 
     this.input.on('pointerdown', (pointer: Phaser.Input.Pointer) => {
       const pos = { x: pointer.worldX, y: pointer.worldY };
+      if (pointer.rightButtonDown()) {
+        this.placementManager.cancel();
+        return;
+      }
       if (this.isPointerOverPanel(pos)) return;
       const targetTower = this.findTowerAt(pos);
       if (targetTower) {
@@ -93,11 +130,11 @@ export default class GameScene extends Phaser.Scene {
         return;
       }
       this.clearSelection();
-      this.tryPlaceTower(pos);
+      this.placementManager.tryPlace(pos);
     });
 
     this.input.on('pointermove', (pointer: Phaser.Input.Pointer) => {
-      this.updatePlacementGhost({ x: pointer.worldX, y: pointer.worldY });
+      this.placementManager.updateGhost({ x: pointer.worldX, y: pointer.worldY });
     });
 
     this.hudText = this.add.text(12, 12, 'Shadow Rift', {
@@ -135,6 +172,8 @@ export default class GameScene extends Phaser.Scene {
 
     this.handleTypeHotkeys();
     this.handleUpgradeHotkey();
+    this.handleCancelHotkey();
+    this.handleSnapHotkey();
 
     this.lastRewardTimer = Math.max(0, this.lastRewardTimer - dt);
 
@@ -175,7 +214,7 @@ export default class GameScene extends Phaser.Scene {
 
     if (this.hudText) {
       const seal = this.rift ? (this.rift.isSealed() ? 'sealed' : `${Math.round(this.rift.getSealProgress() * 100)}%`) : 'n/a';
-      const cd = this.pendingSpawns > 0 ? `spawning` : `${this.waveCooldown.toFixed(1)}s`;
+      const cd = this.buildPhase ? `prep ${this.buildTimer.toFixed(1)}s` : this.pendingSpawns > 0 ? `spawning` : 'active';
       const cost = this.getSelectedCost();
       this.hudText.setText(
         `Wave ${this.wave}\nNext wave: ${cd}\nEnemies: ${this.enemies.length}\nTowers: ${this.towers.length}\nResources: ${this.resources} (cost ${cost})${
@@ -185,15 +224,25 @@ export default class GameScene extends Phaser.Scene {
     }
 
     if (this.waveInfoText) {
-      this.waveInfoText.setText(this.describeNextWave());
+      const phase = this.buildPhase ? `prep ${this.buildTimer.toFixed(1)}s` : `wave ${this.wave}`;
+      this.waveInfoText.setText(`${phase} | ${this.describeNextWave()}`);
     }
+
+    this.updateStartButtonState();
   }
 
   private updateWaves(dt: number) {
-    if (this.pendingSpawns <= 0) {
-      this.waveCooldown -= dt;
-      if (this.waveCooldown <= 0) {
+    if (this.buildPhase) {
+      this.buildTimer -= dt;
+      if (this.buildTimer <= 0) {
         this.startWave();
+      }
+      return;
+    }
+
+    if (this.pendingSpawns <= 0) {
+      if (this.enemies.length <= 0) {
+        this.enterBuildPhase();
       }
       return;
     }
@@ -216,13 +265,21 @@ export default class GameScene extends Phaser.Scene {
   }
 
   private startWave() {
+    this.buildPhase = false;
     const spec = this.buildWaveSpec(this.wave);
     this.pendingSpawns = spec.count;
     this.spawnInterval = spec.interval;
     this.spawnTimer = 0.2;
-    this.waveCooldown = spec.rest;
     this.alertWave(`Wave ${this.wave} incoming`);
     this.wave += 1;
+    this.buildTimer = 0;
+    this.updateStartButtonState();
+  }
+
+  private startNextWaveEarly() {
+    if (this.buildPhase) {
+      this.startWave();
+    }
   }
 
   private buildWaveSpec(wave: number) {
@@ -252,6 +309,19 @@ export default class GameScene extends Phaser.Scene {
     }
   }
 
+  private enterBuildPhase() {
+    this.buildPhase = true;
+    this.buildTimer = GAME_CONFIG.buildPhaseDuration;
+    this.pendingSpawns = 0;
+    this.spawnTimer = 0;
+    const interest = Math.min(30, Math.floor(this.resources * this.interestRate));
+    if (interest > 0) {
+      this.addResources(interest);
+      this.showPopup({ x: 60, y: 52 }, `Interest +${interest}`, '#9ef7c2');
+    }
+    this.updateStartButtonState();
+  }
+
   private buildTowers() {
     const placements: Point[] = [
       { x: 260, y: 340 },
@@ -261,20 +331,10 @@ export default class GameScene extends Phaser.Scene {
     return placements.map((p) => new Tower(this, p, 'basic'));
   }
 
-  private tryPlaceTower(pos: Point) {
-    const check = this.isPlacementAllowed(pos);
-    if (!check.valid) return;
-    const tower = new Tower(this, pos, this.selectedTowerType);
-    this.towers.push(tower);
-    this.resources -= this.getSelectedCost();
-    this.updateTypeSelectorHighlight();
-    this.flashPlacement(pos);
-    this.showPopup(pos, `Built ${this.selectedTowerType}`, '#9ef7c2');
-    this.selectTower(tower);
-  }
-
   private tryUpgradeTower(tower: Tower, pos: Point): boolean {
-    const nextCost = tower.getNextCost();
+    const rawNextCost = tower.getNextCost();
+    const discount = this.buildPhase ? GAME_CONFIG.upgradeDiscountPrep : 1;
+    const nextCost = rawNextCost === null ? null : Math.max(1, Math.floor(rawNextCost * discount));
     if (nextCost === null) {
       this.showPopup(pos, 'Max level', '#d4d4d8');
       return false;
@@ -295,7 +355,8 @@ export default class GameScene extends Phaser.Scene {
   }
 
   private trySellTower(tower: Tower) {
-    const value = tower.getSellValue(0.7);
+    const refundRatio = this.buildPhase ? GAME_CONFIG.sellRefundPrep : GAME_CONFIG.sellRefundWave;
+    const value = tower.getSellValue(refundRatio);
     const pos = tower.getPosition();
     tower.destroyTower();
     this.towers = this.towers.filter((t) => t !== tower);
@@ -304,54 +365,6 @@ export default class GameScene extends Phaser.Scene {
     this.flashPlacement({ x: pos.x, y: pos.y });
     this.showPopup({ x: pos.x, y: pos.y }, `Sold +${value}`, '#9ef7c2');
     this.clearSelection();
-  }
-
-  private isPlacementAllowed(pos: Point) {
-    if (pos.x < 30 || pos.x > 930 || pos.y < 30 || pos.y > 510) {
-      return { valid: false, reason: 'out-of-bounds' };
-    }
-    if (this.resources < this.getSelectedCost()) {
-      return { valid: false, reason: 'no-resources' };
-    }
-    const pt = new Phaser.Math.Vector2(pos.x, pos.y);
-    if (this.pathManager.distanceToPath(pt) < 34) {
-      return { valid: false, reason: 'too-close-to-path' };
-    }
-    if (this.rift && pt.distance(this.rift.getPosition()) < 90) {
-      return { valid: false, reason: 'near-rift' };
-    }
-    const blocked = this.towers.some((t) => t.getPosition().distance(pt) < 56);
-    if (blocked) {
-      return { valid: false, reason: 'too-close-to-tower' };
-    }
-    return { valid: true, reason: '' };
-  }
-
-  private updatePlacementGhost(pos: Point) {
-    if (!this.placementGhost || !this.placementText) return;
-    const tower = this.findTowerAt(pos);
-    this.placementGhost.setPosition(pos.x, pos.y);
-    this.placementText.setPosition(pos.x + 28, pos.y - 12);
-
-    if (tower) {
-      const levelInfo = `Lv ${tower.getLevel()} ${tower.getType()}`;
-      this.placementGhost.setVisible(false);
-      this.placementText.setVisible(true);
-      this.placementText.setText(levelInfo);
-      this.placementText.setColor('#c8d0ff');
-      return;
-    }
-
-    this.placementGhost.setVisible(true);
-    this.placementText.setVisible(true);
-
-    const check = this.isPlacementAllowed(pos);
-    const texture = check.valid ? 'tower-ghost-ok' : 'tower-ghost-bad';
-    this.placementGhost.setTexture(texture);
-    this.placementGhost.setAlpha(check.valid ? 0.9 : 0.6);
-    this.placementGhost.setTint(TOWER_COLOR[this.selectedTowerType]);
-    this.placementText.setText(check.valid ? `Place (${this.getSelectedCost()})` : 'Blocked');
-    this.placementText.setColor(check.valid ? '#88ffb7' : '#ff6b6b');
   }
 
   private getSelectedCost() {
@@ -373,6 +386,20 @@ export default class GameScene extends Phaser.Scene {
     }
     this.selectedTowerType = type;
     this.updateTypeSelectorHighlight();
+  }
+
+  private handleCancelHotkey() {
+    if (!this.cancelKey) return;
+    if (Phaser.Input.Keyboard.JustDown(this.cancelKey)) {
+      this.placementManager.cancel();
+    }
+  }
+
+  private handleSnapHotkey() {
+    if (!this.snapToggleKey) return;
+    if (Phaser.Input.Keyboard.JustDown(this.snapToggleKey)) {
+      this.placementManager.toggleSnap();
+    }
   }
 
   private handleUpgradeHotkey() {
@@ -459,47 +486,8 @@ export default class GameScene extends Phaser.Scene {
     this.clearSelection();
   }
 
-  private buildTypeSelector() {
-    const types: TowerType[] = ['basic', 'slow', 'splash', 'sniper'];
-    const centerX = 300;
-    const y = 506;
-    const spacing = 112;
-    const bgWidth = spacing * types.length + 24;
-
-    this.typeButtonsBg = this.add.rectangle(centerX, y, bgWidth, 48, 0x0f101c, 0.92).setStrokeStyle(1, 0x2f3148, 0.9);
-    this.typeButtonsBg.setDepth(10);
-
-    const startX = centerX - ((types.length - 1) * spacing) / 2;
-    types.forEach((type, idx) => {
-      const bx = startX + idx * spacing;
-      const box = this.add.rectangle(bx, y, 96, 34, 0x171827, 0.95).setStrokeStyle(2, TOWER_COLOR[type], 0.55);
-      box.setDepth(11);
-      box.setInteractive({ useHandCursor: true });
-      box.on('pointerdown', (pointer: Phaser.Input.Pointer) => {
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        (pointer.event as any)?.stopPropagation?.();
-        this.setSelectedTowerType(type);
-      });
-
-      const label = this.add.text(bx - 42, y - 10, type, {
-        fontSize: '12px',
-        color: '#e4e4ec',
-        fontFamily: 'Montserrat, sans-serif'
-      });
-      label.setDepth(12);
-
-      const costVal = TOWER_CONFIG[type].levels[0].cost;
-      const cost = this.add.text(bx - 42, y + 4, `cost ${costVal}`, {
-        fontSize: '11px',
-        color: '#9ef7c2',
-        fontFamily: 'Montserrat, sans-serif'
-      });
-      cost.setDepth(12);
-
-      this.typeButtons.push({ type, box, label, cost });
-    });
-
-    this.updateTypeSelectorHighlight();
+  private updateStartButtonState() {
+    updateStartButtonState(this.startButton, this.buildPhase, this.buildTimer);
   }
 
   private tryUpgradeSelected() {
@@ -528,10 +516,13 @@ export default class GameScene extends Phaser.Scene {
 
     const stats = this.selectedTower.getStats();
     const nextStats = this.selectedTower.getNextStats();
-    const nextCost = this.selectedTower.getNextCost();
+    const rawNextCost = this.selectedTower.getNextCost();
+    const discount = this.buildPhase ? GAME_CONFIG.upgradeDiscountPrep : 1;
+    const nextCost = rawNextCost === null ? null : Math.max(1, Math.floor(rawNextCost * discount));
     const type = this.selectedTower.getType();
-    const color = TOWER_COLOR[type] ?? 0xffffff;
-    const sellValue = this.selectedTower.getSellValue(0.7);
+    const color = getTowerTint(type, this.selectedTower.getLevel());
+    const refundRatio = this.buildPhase ? GAME_CONFIG.sellRefundPrep : GAME_CONFIG.sellRefundWave;
+    const sellValue = this.selectedTower.getSellValue(refundRatio);
 
     bg.setVisible(true).setFillStyle(0x11121f, 0.92);
     text.setVisible(true);
@@ -581,7 +572,7 @@ export default class GameScene extends Phaser.Scene {
 
   private refreshRangeIndicators(tower: Tower, prevRange?: number) {
     const pos = tower.getPosition();
-    const color = TOWER_COLOR[tower.getType()] ?? 0xffffff;
+    const color = getTowerTint(tower.getType(), tower.getLevel());
     const currentRange = tower.getStats().range;
     const nextRange = tower.getNextStats()?.range ?? null;
 
@@ -624,20 +615,7 @@ export default class GameScene extends Phaser.Scene {
   }
 
   private updateTypeSelectorHighlight() {
-    if (!this.typeButtons.length) return;
-    this.typeButtons.forEach(({ type, box, label, cost }) => {
-      const selected = this.selectedTowerType === type;
-      const baseColor = TOWER_COLOR[type] ?? 0xffffff;
-      const affordable = this.resources >= TOWER_CONFIG[type].levels[0].cost;
-      box.setFillStyle(selected ? 0x202437 : 0x171827, selected ? 0.95 : 0.88);
-      box.setStrokeStyle(selected ? 3 : 1.5, baseColor, selected ? 0.9 : 0.55);
-      label.setColor(selected ? '#ffffff' : '#e4e4ec');
-      cost.setColor(affordable ? '#b0ffd6' : '#ff9f9f');
-      cost.setText(affordable ? `cost ${TOWER_CONFIG[type].levels[0].cost}` : `need ${TOWER_CONFIG[type].levels[0].cost}`);
-      box.setAlpha(affordable ? 1 : 0.75);
-      label.setAlpha(affordable ? 1 : 0.85);
-      cost.setAlpha(affordable ? 1 : 0.9);
-    });
+    updateTypeSelectorHighlight(this.typeSelector, this.selectedTowerType, this.resources);
   }
 
   private showPopup(pos: Point, text: string, color: string) {
@@ -651,11 +629,23 @@ export default class GameScene extends Phaser.Scene {
   }
 
   private isPointerOverPanel(pos: Point) {
-    if (!this.towerPanel || !this.towerPanel.bg.visible) return false;
-    const { bg } = this.towerPanel;
-    const halfW = bg.width / 2;
-    const halfH = bg.height / 2;
-    return pos.x >= bg.x - halfW && pos.x <= bg.x + halfW && pos.y >= bg.y - halfH && pos.y <= bg.y + halfH;
+    const inTowerPanel = (() => {
+      if (!this.towerPanel || !this.towerPanel.bg.visible) return false;
+      const { bg } = this.towerPanel;
+      const halfW = bg.width / 2;
+      const halfH = bg.height / 2;
+      return pos.x >= bg.x - halfW && pos.x <= bg.x + halfW && pos.y >= bg.y - halfH && pos.y <= bg.y + halfH;
+    })();
+
+    const inTypeSelector = (() => {
+      if (!this.typeSelector || !this.typeSelector.bg.visible) return false;
+      const bg = this.typeSelector.bg;
+      const halfW = bg.width / 2;
+      const halfH = bg.height / 2;
+      return pos.x >= bg.x - halfW && pos.x <= bg.x + halfW && pos.y >= bg.y - halfH && pos.y <= bg.y + halfH;
+    })();
+
+    return inTowerPanel || inTypeSelector;
   }
 
   private flashPlacement(pos: Point) {
